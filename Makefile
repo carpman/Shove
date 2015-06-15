@@ -1,6 +1,6 @@
 CC := cc
 CFLAGS := -g3
-LIBS := -lssl -lcrypto -lstrophe -lconfuse
+LIBS := -lssl -lcrypto -lstrophe -lconfuse 
 SOURCES := shove.c
 PROJECT := shove
 

@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <wordexp.h>
 #include <string.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #include <strophe.h>
 #include <confuse.h>
@@ -20,11 +22,13 @@ static cfg_opt_t command_opts[] = {
 
 static cfg_opt_t config_opts[] = {
     CFG_SEC("connection", connection_opts, CFGF_NONE),
+    CFG_STR("fifo", "/tmp/shovefifo", CFGF_NONE),
     CFG_SEC("command", command_opts, CFGF_MULTI | CFGF_TITLE),
     CFG_END()
 };
 
 static cfg_t *cfg = NULL;
+static running = 0;
 
 int message_handler(xmpp_conn_t * const conn, xmpp_stanza_t * const stanza,
                     void * const userdata){
@@ -41,11 +45,29 @@ int message_handler(xmpp_conn_t * const conn, xmpp_stanza_t * const stanza,
     int n = cfg_size(cfg, "command");
     int found = 0;
     int i = 0;
+
+    char *sep = strchr(intext, ' ');
+    char *cmd = intext;
+
+    if(sep){
+        sep[0] = 0;
+    }
+
     for(i = 0; i < n; i++){
         cfg_t *command_config = cfg_getnsec(cfg, "command", i);
-        if(!strncmp(cfg_title(command_config), intext, strlen(cfg_title(command_config)))){
+        if(!strncmp(cfg_title(command_config), cmd, strlen(cfg_title(command_config)))){
             found = 1;
-            FILE *processio = popen(cfg_getstr(command_config, "execute"), "r");
+           
+            char *fullcmd = malloc(strlen(cfg_getstr(command_config, "execute"))+
+                                   strlen(xmpp_stanza_get_attribute(stanza, "from"))+2+
+                                   strlen(sep+1)+2);
+            strcpy(fullcmd, cfg_getstr(command_config, "execute"));
+            strcat(fullcmd, " ");
+            strcat(fullcmd, xmpp_stanza_get_attribute(stanza, "from"));
+            strcat(fullcmd, " ");
+            strcat(fullcmd, sep+1);
+
+            FILE *processio = popen(fullcmd, "r");
 
             if(processio > 0){
                 char buffer[128];
@@ -57,6 +79,7 @@ int message_handler(xmpp_conn_t * const conn, xmpp_stanza_t * const stanza,
                         strcat(new_result_buffer, result_buffer);
                         strcat(new_result_buffer, buffer);
                         free(result_buffer);
+                        result_buffer = new_result_buffer;
                     }else{
                         result_buffer = malloc(sizeof(buffer)+1);
                         strcpy(result_buffer, buffer);
@@ -65,25 +88,29 @@ int message_handler(xmpp_conn_t * const conn, xmpp_stanza_t * const stanza,
 
                 int result = pclose(processio);
 
-                reply = xmpp_stanza_new(ctx);
-                xmpp_stanza_set_name(reply, "message");
-                xmpp_stanza_set_type(reply, xmpp_stanza_get_type(stanza)?xmpp_stanza_get_type(stanza):"chat");
-                xmpp_stanza_set_attribute(reply, "to", xmpp_stanza_get_attribute(stanza, "from"));
+                if(result_buffer){
+                    reply = xmpp_stanza_new(ctx);
+                    xmpp_stanza_set_name(reply, "message");
+                    xmpp_stanza_set_type(reply, xmpp_stanza_get_type(stanza)?xmpp_stanza_get_type(stanza):"chat");
+                    xmpp_stanza_set_attribute(reply, "to", xmpp_stanza_get_attribute(stanza, "from"));
 
-                body = xmpp_stanza_new(ctx);
-                xmpp_stanza_set_name(body, "body");
+                    body = xmpp_stanza_new(ctx);
+                    xmpp_stanza_set_name(body, "body");
 
-                text = xmpp_stanza_new(ctx);
-                sprintf(buffer, result_buffer);
-                xmpp_stanza_set_text(text, buffer);
+                    text = xmpp_stanza_new(ctx);
+                    xmpp_stanza_set_text(text, result_buffer);
 
-                xmpp_stanza_add_child(body, text);
-                xmpp_stanza_add_child(reply, body);
+                    xmpp_stanza_add_child(body, text);
+                    xmpp_stanza_add_child(reply, body);
 
-                xmpp_send(conn, reply);
-                xmpp_stanza_release(reply);
-                free(result_buffer);
+                    xmpp_send(conn, reply);
+                    xmpp_stanza_release(reply);
+                    free(result_buffer);
+                }
             }
+
+            free(fullcmd);
+
             break;
         }
     }
@@ -115,6 +142,7 @@ int main(int argc, char **argv){
     xmpp_log_t *log;
     char *jid, *pass;
     wordexp_t exp_result;
+    int fifofd = 0;
 
     cfg = cfg_init(config_opts, CFGF_NOCASE);
 
@@ -135,18 +163,52 @@ int main(int argc, char **argv){
 
         cfg_t *conncfg = cfg_getsec(cfg, "connection");
         if(conncfg){
-            printf(">>>>>>>%s\n>>>>>>>>%s\n", cfg_getstr(conncfg, "jid"), cfg_getstr(conncfg, "password"));
             xmpp_conn_set_jid(conn, cfg_getstr(conncfg, "jid"));
             xmpp_conn_set_pass(conn, cfg_getstr(conncfg, "password"));
         
             xmpp_connect_client(conn, NULL, 0, conn_handler, ctx);
 
-            xmpp_run(ctx);
+            running = 1;
+
+            mkfifo(cfg_getstr(cfg, "fifo"), 0666);
+            int fifofd = open(cfg_getstr(cfg, "fifo"), O_RDONLY | O_NONBLOCK);
+    
+            while(running == 1){
+                xmpp_run_once(ctx, 500);
+                char fifo_buffer[1024];
+                int len;
+                if((len = read(fifofd, fifo_buffer, sizeof(fifo_buffer))) > 0){
+                    fifo_buffer[len] = 0;
+                    char *sep = strchr(fifo_buffer, ' ');
+                    if(sep){
+                        *sep = 0;
+                        xmpp_stanza_t *reply, *body, *text;
+
+                        reply = xmpp_stanza_new(ctx);
+                        xmpp_stanza_set_name(reply, "message");
+                        xmpp_stanza_set_type(reply, "chat");
+                        xmpp_stanza_set_attribute(reply, "to", fifo_buffer);
+
+                        body = xmpp_stanza_new(ctx);
+                        xmpp_stanza_set_name(body, "body");
+
+                        text = xmpp_stanza_new(ctx);
+                        xmpp_stanza_set_text(text, sep+1);
+                        xmpp_stanza_add_child(body, text);
+                        xmpp_stanza_add_child(reply, body);
+                        xmpp_send(conn, reply);
+                        xmpp_stanza_release(reply);
+                    }
+                }
+            }
 
             xmpp_conn_release(conn);
             xmpp_ctx_free(ctx);
 
             xmpp_shutdown();
+
+            close(fifofd);
+            unlink(cfg_getstr(cfg, "fifo"));
         }else{
             printf("Connection section missing.\n");
             exit(1);
