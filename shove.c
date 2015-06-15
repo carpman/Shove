@@ -57,15 +57,20 @@ int message_handler(xmpp_conn_t * const conn, xmpp_stanza_t * const stanza,
         cfg_t *command_config = cfg_getnsec(cfg, "command", i);
         if(!strncmp(cfg_title(command_config), cmd, strlen(cfg_title(command_config)))){
             found = 1;
-           
+            int sep_size = 0;
+            if(sep)
+                sep_size = strlen(sep+1)+2;
+
             char *fullcmd = malloc(strlen(cfg_getstr(command_config, "execute"))+
                                    strlen(xmpp_stanza_get_attribute(stanza, "from"))+2+
-                                   strlen(sep+1)+2);
+                                   sep_size);
             strcpy(fullcmd, cfg_getstr(command_config, "execute"));
             strcat(fullcmd, " ");
             strcat(fullcmd, xmpp_stanza_get_attribute(stanza, "from"));
-            strcat(fullcmd, " ");
-            strcat(fullcmd, sep+1);
+            if(sep){
+                strcat(fullcmd, " ");
+                strcat(fullcmd, sep+1);
+            }
 
             FILE *processio = popen(fullcmd, "r");
 
