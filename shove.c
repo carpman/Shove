@@ -30,6 +30,28 @@ static cfg_opt_t config_opts[] = {
 static cfg_t *cfg = NULL;
 static running = 0;
 
+int presence_handler(xmpp_conn_t * const conn, xmpp_stanza_t * const stanza,
+                     void * const userdata){
+
+    xmpp_ctx_t *ctx = (xmpp_ctx_t *)userdata;
+    
+    char *type = xmpp_stanza_get_attribute(stanza, "type");
+
+    if(type != NULL && !strcmp(type, "subscribe")){
+        cfg_t *conncfg = cfg_getsec(cfg, "connection");
+        xmpp_stanza_t *reply = xmpp_stanza_new(ctx);
+        xmpp_stanza_set_name(reply, "presence");
+        xmpp_stanza_set_type(reply, "subscribed");
+        xmpp_stanza_set_attribute(reply, "from", cfg_getstr(conncfg, "jid"));
+        xmpp_stanza_set_attribute(reply, "to", xmpp_stanza_get_attribute(stanza, "from"));
+
+        xmpp_send(conn, reply);
+        xmpp_stanza_release(reply);
+    }
+
+    return 1;
+}
+
 int message_handler(xmpp_conn_t * const conn, xmpp_stanza_t * const stanza,
                     void * const userdata){
     xmpp_stanza_t *reply, *body, *text;
@@ -125,6 +147,7 @@ void conn_handler(xmpp_conn_t * const conn, const xmpp_conn_event_t status,
 
     if(status == XMPP_CONN_CONNECT){
         xmpp_handler_add(conn, message_handler, NULL, "message", NULL, ctx);
+        xmpp_handler_add(conn, presence_handler, NULL, "presence", NULL, ctx);
 
         xmpp_stanza_t *pres = xmpp_stanza_new(ctx);
         xmpp_stanza_set_name(pres, "presence");
@@ -143,6 +166,7 @@ int main(int argc, char **argv){
     char *jid, *pass;
     wordexp_t exp_result;
     int fifofd = 0;
+    int ping_timer = 0;
 
     cfg = cfg_init(config_opts, CFGF_NOCASE);
 
@@ -199,6 +223,23 @@ int main(int argc, char **argv){
                         xmpp_send(conn, reply);
                         xmpp_stanza_release(reply);
                     }
+                }
+                ping_timer++;
+                if(ping_timer == 60){
+                    xmpp_stanza_t *iq = xmpp_stanza_new(ctx);
+                    xmpp_stanza_set_name(iq, "iq");
+                    xmpp_stanza_set_type(iq, "get");
+                    xmpp_stanza_set_attribute(iq, "from", cfg_getstr(conncfg, "jid"));
+                    xmpp_stanza_set_attribute(iq, "id", "asdf");
+
+                    xmpp_stanza_t *ping = xmpp_stanza_new(ctx);
+                    xmpp_stanza_set_name(ping, "ping");
+                    xmpp_stanza_set_attribute(ping, "xmlns", "urn:xmpp:ping");
+
+                    xmpp_stanza_add_child(iq, ping);
+                    xmpp_send(conn, iq);
+                    xmpp_stanza_release(iq);
+                    ping_timer = 0;
                 }
             }
 
